@@ -1,0 +1,5 @@
+{
+  "name": "HachiTrend",
+  "description": "Track real-time YouTube trends using Google Search Grounding and generate viral video ideas, scripts, and thumbnails with Gemini.",
+  "requestFramePermissions": []
+}
