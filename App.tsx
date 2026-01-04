@@ -6,7 +6,9 @@ import IdeaCard from './components/IdeaCard';
 import ScriptView from './components/ScriptView';
 import ChannelAnalyzer from './components/ChannelAnalyzer';
 import SettingsModal from './components/SettingsModal';
-import { Youtube, Sparkles, LayoutGrid, Loader2, RefreshCw, Search, Settings, X } from 'lucide-react';
+import OutlierHunter from './components/OutlierHunter';
+import VideoOptimizer from './components/VideoOptimizer';
+import { Youtube, Sparkles, LayoutGrid, Loader2, RefreshCw, Search, Settings, X, Target, Key, Zap } from 'lucide-react';
 
 const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<AppView>(AppView.TRENDS);
@@ -30,7 +32,10 @@ const App: React.FC = () => {
 
   // Initial load
   React.useEffect(() => {
-    handleFetchTrends(selectedNiche);
+    // Only attempt to fetch if we have an API key stored.
+    if (youtubeApiKey) {
+      handleFetchTrends(selectedNiche);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -38,13 +43,22 @@ const App: React.FC = () => {
     setYoutubeApiKey(key);
     localStorage.setItem('youtube_api_key', key);
     setIsSettingsOpen(false);
-    // Optionally refresh trends if on trends view
-    if (currentView === AppView.TRENDS) {
+    
+    // If the user was stuck on the no-key screen, refresh trends now
+    if (key && currentView === AppView.TRENDS) {
         setTimeout(() => handleFetchTrends(selectedNiche, key, activeKeyword || undefined), 100);
     }
   };
 
   const handleFetchTrends = async (niche: Niche, overrideKey?: string, keyword?: string) => {
+    const keyToUse = overrideKey !== undefined ? overrideKey : youtubeApiKey;
+    
+    if (!keyToUse) {
+        setError("Please configure your YouTube API Key in settings to fetch trends.");
+        setIsSettingsOpen(true);
+        return;
+    }
+
     setLoadingTrends(true);
     setError(null);
     setTrends([]);
@@ -56,14 +70,13 @@ const App: React.FC = () => {
     const kw = keyword !== undefined ? keyword : activeKeyword || undefined;
 
     try {
-      const keyToUse = overrideKey !== undefined ? overrideKey : youtubeApiKey;
       const fetchedTrends = await fetchTrends(niche, keyToUse, kw);
       setTrends(fetchedTrends);
     } catch (e: any) {
       console.error(e);
       let msg = "Failed to fetch trends.";
-      if (e.message.includes("YouTube API")) msg += " Please check your YouTube API Key in settings.";
-      else msg += " Gemini might be busy or Search Grounding quota exceeded.";
+      if (e.message && e.message.includes("YouTube API")) msg += " Please check your YouTube API Key.";
+      else msg += " " + e.message;
       setError(msg);
     } finally {
       setLoadingTrends(false);
@@ -84,17 +97,15 @@ const App: React.FC = () => {
 
   const handleNicheChange = (niche: Niche) => {
     setSelectedNiche(niche);
-    // If we switch niche, we typically clear the keyword search to see that niche's trends
-    // unless we want to search the keyword WITHIN the niche.
-    // The current service logic prioritizes keyword over niche if keyword exists.
-    // Let's clear keyword to avoid confusion when clicking a niche button.
     setTrendSearchQuery('');
     setActiveKeyword(null);
-
     setSelectedTrend(null);
     setIdeas([]);
     setCurrentView(AppView.TRENDS);
-    handleFetchTrends(niche, undefined, '');
+    
+    if (youtubeApiKey) {
+        handleFetchTrends(niche, undefined, '');
+    }
   };
 
   const handleTrendSelect = async (trend: Trend) => {
@@ -127,8 +138,7 @@ const App: React.FC = () => {
     if (selectedTrend) {
       setCurrentView(AppView.IDEAS);
     } else {
-      // Came from Channel Search
-      setCurrentView(AppView.CHANNEL_SEARCH);
+       setCurrentView(AppView.IDEAS);
     }
     setSelectedIdea(null);
   };
@@ -154,7 +164,8 @@ const App: React.FC = () => {
         
         {/* Navigation / Niche Selector */}
         <div className="flex items-center space-x-2">
-            {currentView !== AppView.CHANNEL_SEARCH && currentView !== AppView.SCRIPT ? (
+            {/* Show Niche selector only on Trends View and if Key exists */}
+            {currentView === AppView.TRENDS && youtubeApiKey ? (
               <div className="hidden md:flex items-center space-x-1 bg-[#1a1a1a] p-1 rounded-full border border-[#333]">
                 {Object.values(Niche).map((niche) => (
                   <button
@@ -173,31 +184,60 @@ const App: React.FC = () => {
             ) : null}
 
             <div className="h-6 w-px bg-[#333] mx-2 hidden md:block"></div>
-            
-            <button
-                onClick={() => setCurrentView(AppView.CHANNEL_SEARCH)}
-                className={`flex items-center space-x-2 px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
-                    currentView === AppView.CHANNEL_SEARCH
-                    ? 'bg-red-600 text-white' 
-                    : 'bg-[#1a1a1a] text-gray-300 hover:bg-[#333]'
-                }`}
-            >
-                <Search size={14} />
-                <span className="hidden sm:inline">Channel Spy</span>
-            </button>
+
              <button
                 onClick={() => {
                   setCurrentView(AppView.TRENDS);
-                  if (trends.length === 0) handleFetchTrends(selectedNiche);
+                  if (trends.length === 0 && youtubeApiKey) handleFetchTrends(selectedNiche);
                 }}
-                className={`flex items-center space-x-2 px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
-                    currentView === AppView.TRENDS || currentView === AppView.IDEAS
-                    ? 'bg-red-600 text-white' 
-                    : 'bg-[#1a1a1a] text-gray-300 hover:bg-[#333]'
+                className={`flex items-center space-x-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all ${
+                    currentView === AppView.TRENDS || (currentView === AppView.IDEAS && selectedTrend && !selectedTrend.trendNature?.includes('Analysis'))
+                    ? 'bg-[#1a1a1a] text-white border border-[#333]' 
+                    : 'text-gray-400 hover:text-white hover:bg-[#1a1a1a]'
                 }`}
+                title="Trends Dashboard"
             >
-                <RefreshCw size={14} />
-                <span className="hidden sm:inline">Trends</span>
+                <RefreshCw size={16} />
+                <span className="hidden lg:inline">Trends</span>
+            </button>
+            
+             <button
+                onClick={() => setCurrentView(AppView.OUTLIER_HUNTER)}
+                className={`flex items-center space-x-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all ${
+                    currentView === AppView.OUTLIER_HUNTER
+                    ? 'bg-red-600 text-white shadow-red-900/20 shadow-lg' 
+                    : 'text-gray-400 hover:text-white hover:bg-[#1a1a1a]'
+                }`}
+                title="Find Viral Outliers"
+            >
+                <Target size={16} />
+                <span className="hidden lg:inline">Outliers</span>
+            </button>
+
+            <button
+                onClick={() => setCurrentView(AppView.CHANNEL_SEARCH)}
+                className={`flex items-center space-x-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all ${
+                    currentView === AppView.CHANNEL_SEARCH
+                    ? 'bg-[#1a1a1a] text-white border border-[#333]' 
+                    : 'text-gray-400 hover:text-white hover:bg-[#1a1a1a]'
+                }`}
+                title="Spy on Channels"
+            >
+                <Search size={16} />
+                <span className="hidden lg:inline">Spy</span>
+            </button>
+            
+            <button
+                onClick={() => setCurrentView(AppView.VIDEO_OPTIMIZER)}
+                className={`flex items-center space-x-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all ${
+                    currentView === AppView.VIDEO_OPTIMIZER
+                    ? 'bg-blue-600 text-white shadow-blue-900/20 shadow-lg' 
+                    : 'text-gray-400 hover:text-white hover:bg-[#1a1a1a]'
+                }`}
+                title="Optimize Video"
+            >
+                <Zap size={16} />
+                <span className="hidden lg:inline">Optimizer</span>
             </button>
             
             <button
@@ -224,87 +264,114 @@ const App: React.FC = () => {
         {/* View: TRENDS */}
         {currentView === AppView.TRENDS && (
           <div className="space-y-6">
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 gap-4">
-              <div className="flex-1">
-                <h1 className="text-3xl font-bold mb-2">
-                    {activeKeyword ? (
-                        <span>Results for <span className="text-red-500">"{activeKeyword}"</span></span>
-                    ) : (
-                        <span>Trending in <span className="text-red-500">{selectedNiche}</span></span>
-                    )}
-                </h1>
-                <p className="text-gray-400 flex items-center text-sm mb-4">
-                    {youtubeApiKey ? (
-                        <span className="flex items-center text-green-400">
-                             <span className="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-                             Live Data from YouTube API
-                        </span>
-                    ) : (
-                        <span className="flex items-center">
-                            AI-Curated Trends powered by Google Search.
-                        </span>
-                    )}
-                </p>
-
-                {/* Keyword Search Input */}
-                <form onSubmit={handleSearchSubmit} className="relative max-w-md">
-                    <input 
-                        type="text" 
-                        value={trendSearchQuery}
-                        onChange={(e) => setTrendSearchQuery(e.target.value)}
-                        placeholder="Search specific keywords (e.g. 'Minecraft', 'AI Tools')..."
-                        className="w-full bg-[#1a1a1a] border border-[#333] text-white pl-4 pr-10 py-2.5 rounded-lg focus:outline-none focus:border-red-500 transition-colors placeholder-gray-600 text-sm"
-                    />
-                    {trendSearchQuery && (
-                         <button 
-                            type="button" 
-                            onClick={clearSearch}
-                            className="absolute right-2 top-2.5 text-gray-500 hover:text-white"
-                        >
-                            <X size={16} />
-                        </button>
-                    )}
-                    {!trendSearchQuery && (
-                         <button 
-                            type="submit" 
-                            className="absolute right-3 top-2.5 text-gray-500"
-                        >
-                            <Search size={16} />
-                        </button>
-                    )}
-                </form>
-
-              </div>
-              <button 
-                onClick={() => handleFetchTrends(selectedNiche, undefined, activeKeyword || undefined)}
-                className="flex items-center space-x-2 bg-[#222] hover:bg-[#333] px-4 py-2 rounded-lg text-sm transition-colors"
-                disabled={loadingTrends}
-              >
-                <RefreshCw size={16} className={loadingTrends ? 'animate-spin' : ''} />
-                <span>Refresh Trends</span>
-              </button>
-            </div>
-
-            {loadingTrends ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {[1, 2, 3, 4, 5, 6].map((i) => (
-                  <div key={i} className="h-64 bg-[#1a1a1a] rounded-xl animate-pulse border border-[#333]"></div>
-                ))}
-              </div>
-            ) : trends.length > 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-in fade-in zoom-in duration-300">
-                {trends.map((trend) => (
-                  <TrendCard key={trend.id} trend={trend} onSelect={handleTrendSelect} />
-                ))}
-              </div>
-            ) : (
-                <div className="text-center py-20 text-gray-500 bg-[#151515] rounded-xl border border-[#222]">
-                    <Search size={48} className="mx-auto mb-4 opacity-20" />
-                    <p className="text-lg font-medium">No trends found.</p>
-                    <p className="text-sm mt-2">Try a different keyword or check your API settings.</p>
+            
+            {/* Show Welcome/Key Prompt if no API Key */}
+            {!youtubeApiKey ? (
+                <div className="flex flex-col items-center justify-center py-20 bg-[#1a1a1a] rounded-2xl border border-[#333] shadow-2xl mt-10">
+                    <div className="w-20 h-20 bg-red-600/20 rounded-full flex items-center justify-center mb-6 text-red-500">
+                        <Youtube size={40} />
+                    </div>
+                    <h1 className="text-3xl font-bold text-white mb-3">Connect YouTube Data</h1>
+                    <p className="text-gray-400 max-w-lg text-center mb-8 px-4">
+                        To access real-time viral trends, channel analytics, and outlier detection, you need to provide a valid YouTube Data API Key.
+                    </p>
+                    <button 
+                        onClick={() => setIsSettingsOpen(true)}
+                        className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white px-8 py-4 rounded-xl font-bold text-lg transition-all shadow-lg shadow-red-900/40"
+                    >
+                        <Key size={20} />
+                        <span>Enter API Key</span>
+                    </button>
                 </div>
+            ) : (
+                // Only show Trends UI if Key exists
+                <>
+                    <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 gap-4">
+                    <div className="flex-1">
+                        <h1 className="text-3xl font-bold mb-2">
+                            {activeKeyword ? (
+                                <span>Results for <span className="text-red-500">"{activeKeyword}"</span></span>
+                            ) : (
+                                <span>Trending in <span className="text-red-500">{selectedNiche}</span></span>
+                            )}
+                        </h1>
+                        <p className="text-gray-400 flex items-center text-sm mb-4">
+                            <span className="flex items-center text-green-400">
+                                    <span className="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
+                                    Live Data from YouTube API
+                            </span>
+                        </p>
+
+                        {/* Keyword Search Input */}
+                        <form onSubmit={handleSearchSubmit} className="relative max-w-md">
+                            <input 
+                                type="text" 
+                                value={trendSearchQuery}
+                                onChange={(e) => setTrendSearchQuery(e.target.value)}
+                                placeholder="Search specific keywords (e.g. 'Minecraft', 'AI Tools')..."
+                                className="w-full bg-[#1a1a1a] border border-[#333] text-white pl-4 pr-10 py-2.5 rounded-lg focus:outline-none focus:border-red-500 transition-colors placeholder-gray-600 text-sm"
+                            />
+                            {trendSearchQuery && (
+                                <button 
+                                    type="button" 
+                                    onClick={clearSearch}
+                                    className="absolute right-2 top-2.5 text-gray-500 hover:text-white"
+                                >
+                                    <X size={16} />
+                                </button>
+                            )}
+                            {!trendSearchQuery && (
+                                <button 
+                                    type="submit" 
+                                    className="absolute right-3 top-2.5 text-gray-500"
+                                >
+                                    <Search size={16} />
+                                </button>
+                            )}
+                        </form>
+
+                    </div>
+                    <button 
+                        onClick={() => handleFetchTrends(selectedNiche, undefined, activeKeyword || undefined)}
+                        className="flex items-center space-x-2 bg-[#222] hover:bg-[#333] px-4 py-2 rounded-lg text-sm transition-colors"
+                        disabled={loadingTrends}
+                    >
+                        <RefreshCw size={16} className={loadingTrends ? 'animate-spin' : ''} />
+                        <span>Refresh Trends</span>
+                    </button>
+                    </div>
+
+                    {loadingTrends ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {[1, 2, 3, 4, 5, 6].map((i) => (
+                        <div key={i} className="h-64 bg-[#1a1a1a] rounded-xl animate-pulse border border-[#333]"></div>
+                        ))}
+                    </div>
+                    ) : trends.length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-in fade-in zoom-in duration-300">
+                        {trends.map((trend) => (
+                        <TrendCard key={trend.id} trend={trend} onSelect={handleTrendSelect} />
+                        ))}
+                    </div>
+                    ) : (
+                        <div className="text-center py-20 text-gray-500 bg-[#151515] rounded-xl border border-[#222]">
+                            <Search size={48} className="mx-auto mb-4 opacity-20" />
+                            <p className="text-lg font-medium">No trends found.</p>
+                            <p className="text-sm mt-2">Try a different keyword or check your API settings.</p>
+                        </div>
+                    )}
+                </>
             )}
           </div>
+        )}
+
+        {/* View: OUTLIER HUNTER */}
+        {currentView === AppView.OUTLIER_HUNTER && (
+            <OutlierHunter 
+                apiKey={youtubeApiKey} 
+                onAnalyzeTrend={handleTrendSelect}
+                onOpenSettings={() => setIsSettingsOpen(true)}
+            />
         )}
 
         {/* View: CHANNEL SEARCH */}
@@ -312,11 +379,26 @@ const App: React.FC = () => {
              <ChannelAnalyzer onIdeaSelect={handleIdeaSelect} />
         )}
 
+        {/* View: VIDEO OPTIMIZER */}
+        {currentView === AppView.VIDEO_OPTIMIZER && (
+             <VideoOptimizer apiKey={youtubeApiKey} onOpenSettings={() => setIsSettingsOpen(true)} />
+        )}
+
         {/* View: IDEAS */}
         {currentView === AppView.IDEAS && (
           <div className="space-y-6">
-            <button onClick={handleBackToTrends} className="flex items-center text-gray-400 hover:text-white mb-4 transition-colors">
-              <LayoutGrid size={18} className="mr-2" /> Back to Trends
+            <button 
+                onClick={() => {
+                    if (selectedTrend?.trendNature === 'Viral Opportunity' && selectedTrend.sources && selectedTrend.sources[0]?.uri.includes('watch')) {
+                        setCurrentView(AppView.OUTLIER_HUNTER);
+                        setIdeas([]);
+                    } else {
+                        handleBackToTrends();
+                    }
+                }} 
+                className="flex items-center text-gray-400 hover:text-white mb-4 transition-colors"
+            >
+              <LayoutGrid size={18} className="mr-2" /> Back
             </button>
 
             <div className="bg-gradient-to-r from-red-900/20 to-transparent border-l-4 border-red-500 p-6 rounded-r-xl mb-8">

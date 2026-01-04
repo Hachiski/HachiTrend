@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { Trend, VideoIdea, ScriptData, ChannelAnalysisResult } from "../types";
+import { Trend, VideoIdea, ScriptData, ChannelAnalysisResult, OutlierVideo, VideoDetails, VideoOptimizationResult } from "../types";
 
 // Initialize Gemini Client
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -15,15 +15,117 @@ const NICHE_CATEGORY_MAP: Record<string, string> = {
 };
 
 /**
- * Fetches trends either from Gemini (Search Grounding) or YouTube API (if key provided).
- * Supports optional keyword search.
+ * Fetches trends from YouTube API.
+ * Requires a valid YouTube Data API Key.
  */
 export const fetchTrends = async (niche: string, youtubeApiKey?: string, keyword?: string): Promise<Trend[]> => {
-  if (youtubeApiKey) {
-    return fetchTrendsFromYouTube(youtubeApiKey, niche, keyword);
-  } else {
-    return fetchTrendsFromGemini(niche, keyword);
+  if (!youtubeApiKey) {
+    throw new Error("YouTube API Key is required to fetch trends.");
   }
+  return fetchTrendsFromYouTube(youtubeApiKey, niche, keyword);
+};
+
+/**
+ * Finds specific outlier videos using the YouTube Data API.
+ * An outlier is defined as a video performing significantly better than the channel's average.
+ */
+export const findOutliers = async (niche: string, apiKey: string, keyword?: string): Promise<OutlierVideo[]> => {
+    if (!apiKey) {
+        throw new Error("YouTube API Key is required for Outlier Hunter.");
+    }
+
+    const MAX_RESULTS = 50; // Fetch more to filter down
+    let videos: any[] = [];
+
+    try {
+        // 1. Search for recent popular videos
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+        const publishedAfter = thirtyDaysAgo.toISOString();
+
+        let searchUrl = `https://www.googleapis.com/youtube/v3/search?part=id&type=video&order=viewCount&publishedAfter=${publishedAfter}&maxResults=${MAX_RESULTS}&key=${apiKey}`;
+
+        if (keyword && keyword.trim() !== '') {
+            searchUrl += `&q=${encodeURIComponent(keyword)}`;
+        } else {
+            const categoryId = NICHE_CATEGORY_MAP[niche];
+            if (categoryId) {
+                searchUrl += `&q=${encodeURIComponent(niche)}`;
+            }
+        }
+        
+        const searchRes = await fetch(searchUrl);
+        const searchData = await searchRes.json();
+        
+        if (!searchRes.ok) throw new Error(searchData.error?.message || "YouTube Search API Error");
+
+        const videoIds = searchData.items?.map((item: any) => item.id.videoId).join(',');
+        if (!videoIds) return [];
+
+        // 2. Fetch Video Details (Views, Likes)
+        const detailsUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&id=${videoIds}&key=${apiKey}`;
+        const detailsRes = await fetch(detailsUrl);
+        const detailsData = await detailsRes.json();
+        
+        if (!detailsRes.ok) throw new Error(detailsData.error?.message || "YouTube Video Details API Error");
+        videos = detailsData.items || [];
+
+        // 3. Fetch Channel Details (Total Views, Total Videos) to calc average
+        const channelIds = [...new Set(videos.map((v: any) => v.snippet.channelId))].join(',');
+        let channelStats: Record<string, { subs: string, avgViews: number }> = {};
+
+        if (channelIds) {
+            const channelsUrl = `https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${channelIds}&key=${apiKey}`;
+            const channelsRes = await fetch(channelsUrl);
+            const channelsData = await channelsRes.json();
+            
+            if (channelsData.items) {
+                channelsData.items.forEach((ch: any) => {
+                    const totalViews = parseInt(ch.statistics.viewCount || '0');
+                    const totalVideos = parseInt(ch.statistics.videoCount || '0');
+                    // Avoid division by zero
+                    const avgViews = totalVideos > 0 ? Math.round(totalViews / totalVideos) : 0;
+
+                    channelStats[ch.id] = {
+                        subs: ch.statistics.subscriberCount,
+                        avgViews: avgViews
+                    };
+                });
+            }
+        }
+
+        // 4. Build Outlier Objects
+        const outliers: OutlierVideo[] = videos.map((v: any) => {
+            const viewCount = parseInt(v.statistics.viewCount || '0');
+            const channelAvg = channelStats[v.snippet.channelId]?.avgViews || 0;
+            const ratio = channelAvg > 0 ? viewCount / channelAvg : 0;
+
+            return {
+                id: v.id,
+                title: v.snippet.title,
+                description: v.snippet.description,
+                thumbnail: v.snippet.thumbnails?.high?.url || v.snippet.thumbnails?.medium?.url,
+                channelTitle: v.snippet.channelTitle,
+                publishedAt: v.snippet.publishedAt,
+                viewCount: viewCount,
+                likeCount: parseInt(v.statistics.likeCount || '0'),
+                commentCount: parseInt(v.statistics.commentCount || '0'),
+                channelSubscriberCount: channelStats[v.snippet.channelId]?.subs || "Unknown",
+                channelTypicalViews: channelAvg,
+                performanceRatio: parseFloat(ratio.toFixed(2)),
+                videoUrl: `https://www.youtube.com/watch?v=${v.id}`
+            };
+        });
+
+        // 5. Filter & Sort
+        return outliers
+            .filter(o => o.viewCount > 1000 && o.channelTypicalViews > 0)
+            .sort((a, b) => b.performanceRatio - a.performanceRatio);
+
+    } catch (error) {
+        console.error("Error finding outliers:", error);
+        throw error;
+    }
 };
 
 /**
@@ -32,7 +134,7 @@ export const fetchTrends = async (niche: string, youtubeApiKey?: string, keyword
  */
 const fetchTrendsFromYouTube = async (apiKey: string, niche: string, keyword?: string): Promise<Trend[]> => {
   let videos: any[] = [];
-  const MAX_RESULTS = 25; // Increased to get a better sample for clustering
+  const MAX_RESULTS = 25; 
 
   try {
     if (keyword && keyword.trim() !== '') {
@@ -80,37 +182,80 @@ const fetchTrendsFromYouTube = async (apiKey: string, niche: string, keyword?: s
 
     if (videos.length === 0) return [];
 
+    // 3. Fetch Channel Statistics (Subs + Total Views + Total Videos) to calculate Avg Channel Performance
+    const channelIds = [...new Set(videos.map((v: any) => v.snippet.channelId))].join(',');
+    let channelStats: Record<string, { subs: string, avgViews: number }> = {};
+
+    if (channelIds) {
+        try {
+            const channelsUrl = `https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${channelIds}&key=${apiKey}`;
+            const channelsRes = await fetch(channelsUrl);
+            const channelsData = await channelsRes.json();
+            
+            if (channelsData.items) {
+                channelsData.items.forEach((ch: any) => {
+                    // Calculate lifetime average views per video for the channel
+                    const totalViews = parseInt(ch.statistics.viewCount || '0');
+                    const totalVideos = parseInt(ch.statistics.videoCount || '0');
+                    const avgViews = totalVideos > 0 ? Math.round(totalViews / totalVideos) : 0;
+
+                    channelStats[ch.id] = {
+                        subs: ch.statistics.subscriberCount,
+                        avgViews: avgViews
+                    };
+                });
+            }
+        } catch (err) {
+            console.error("Failed to fetch channel stats", err);
+        }
+    }
+
     // Prepare data for Gemini to analyze
     const videoSummaries = videos.map((v: any) => ({
       id: v.id,
       title: v.snippet.title,
       channel: v.snippet.channelTitle,
+      subscriberCount: channelStats[v.snippet.channelId]?.subs || "Unknown",
+      channelTypicalViews: channelStats[v.snippet.channelId]?.avgViews || "Unknown",
       views: v.statistics.viewCount,
+      likes: v.statistics.likeCount,
+      comments: v.statistics.commentCount,
+      publishedAt: v.snippet.publishedAt,
       description: v.snippet.description ? v.snippet.description.substring(0, 100) + "..." : ""
     }));
 
     const modelId = 'gemini-3-flash-preview';
     
-    // Updated Prompt: Force abstraction of topics
+    // Updated Prompt: Added Channel Avg Views Analysis
     const prompt = `
       I have a list of ${videos.length} currently popular YouTube videos related to ${keyword ? `the keyword "${keyword}"` : `the niche "${niche}"`}.
       
-      Raw Video Data:
+      Raw Video Data (Includes Subscriber Counts and Channel Typical Views):
       ${JSON.stringify(videoSummaries)}
 
       YOUR TASK:
       Analyze this data to identify **5 DISTINCT MACRO TRENDS or TOPICS**. 
-      Do NOT simply list the video titles. You must cluster similar videos together and identify the underlying subject matter or format that is trending.
-
-      Example:
-      - If you see videos "I played GTA 6", "GTA 6 Trailer Reaction", and "GTA 6 Leaks", the Trend Title should be "GTA 6 Hype" or "GTA 6 Leaks Analysis", NOT just one of the video titles.
+      Cluster similar videos together.
       
       Output Requirements for each Trend:
       1. 'title': The abstract name of the trend/topic (2-5 words).
-      2. 'description': Explain the *pattern* you see. Why is this topic exploding? What are creators doing with it?
-      3. 'relevanceScore': A score (80-100) based on the aggregate view counts of videos in this cluster.
-      4. 'searchQuery': A generic search query to find more content on this specific topic.
-      5. 'sources': An array of objects { "title": "Video Title", "uri": "https://youtube.com/watch?v=ID" } containing the top 1-3 videos from the raw data that best exemplify this trend.
+      2. 'description': Explain the *pattern* you see. Why is this topic exploding?
+      3. 'relevanceScore': A score (80-100) based on the aggregate view counts.
+      4. 'searchQuery': A generic search query.
+      5. 'sources': Array of { "title", "uri" } (top 1-3 videos).
+      6. 'stats': An object containing calculated averages from the videos in this cluster:
+         - 'averageViews': formatted string (e.g. "1.2M", "500K")
+         - 'averageLikes': formatted string
+         - 'averageComments': formatted string
+         - 'engagementRate': formatted string (e.g. "4.5%") calculated as ((averageLikes + averageComments) / averageViews) * 100.
+         - 'averageSubscriberCount': formatted string (e.g. "500K", "10M").
+         - 'averageChannelViews': formatted string (e.g. "50K", "1M"). The average 'channelTypicalViews' of the creators in this trend.
+      7. 'sparkline': An array of 7 integers (0-100) representing the estimated trend intensity over the last 7 days. 
+      8. 'videoCount': The integer count of videos from the raw data that were clustered into this trend.
+      9. 'trendNature': EXACTLY ONE of these strings: 
+          - 'Big Creator Dominated' (If avg subs > 1M).
+          - 'Viral Opportunity' (If avg subs < 200k).
+          - 'Mixed' (A mix of both).
 
       Return a JSON array of these 5 Trend objects.
     `;
@@ -127,81 +272,13 @@ const fetchTrendsFromYouTube = async (apiKey: string, niche: string, keyword?: s
     const cleanedText = text.replace(/```json/g, '').replace(/```/g, '').trim();
     const trends = JSON.parse(cleanedText);
 
-    // Assign unique IDs if missing (Gemini usually handles this, but we ensure safety)
     return trends.map((t: any, i: number) => ({
         ...t,
         id: t.id || `trend-${Date.now()}-${i}`
     }));
 
   } catch (error) {
-    console.error("YouTube API failed, falling back to Gemini Search...", error);
-    // Fallback to Gemini Search if API key is invalid or quota exceeded
-    return fetchTrendsFromGemini(niche, keyword);
-  }
-};
-
-/**
- * Fetches trends using Gemini with Google Search Grounding.
- */
-const fetchTrendsFromGemini = async (niche: string, keyword?: string): Promise<Trend[]> => {
-  const modelId = 'gemini-3-flash-preview';
-  
-  const context = keyword 
-    ? `specifically related to the keyword: "${keyword}".` 
-    : `specifically within the '${niche}' niche.`;
-
-  const prompt = `
-    Identify 5 currently exploding **TOPICS** or **VIRAL CONCEPTS** on YouTube ${context}
-    Use Google Search to find real-time, up-to-date information for today.
-
-    CRITICAL: Do not just return a specific video title. Return the *Topic* that is trending.
-    
-    For each trend found, provide:
-    1. A catchy title for the trend (e.g., "The '100 Layers' Challenge" or "AI Voice Covers").
-    2. A brief description of why it is trending right now and what makes it viral.
-    3. A relevance score (1-100) based on popularity.
-    4. A generic search query to find these videos on YouTube.
-
-    Return the data as a clean JSON array of objects.
-    The JSON structure should be:
-    [
-      { "id": "1", "title": "...", "description": "...", "relevanceScore": 85, "searchQuery": "..." }
-    ]
-  `;
-
-  try {
-    const response = await ai.models.generateContent({
-      model: modelId,
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: 'application/json' 
-      }
-    });
-
-    const text = response.text;
-    if (!text) return [];
-
-    let trends: Trend[] = [];
-    try {
-      const cleanedText = text.replace(/```json/g, '').replace(/```/g, '').trim();
-      trends = JSON.parse(cleanedText);
-    } catch (e) {
-      console.error("Failed to parse trends JSON", e);
-      return [];
-    }
-
-    const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks
-      ?.map((chunk: any) => chunk.web)
-      .filter((web: any) => web?.uri && web?.title) || [];
-
-    return trends.map((t, index) => ({
-      ...t,
-      sources: index === 0 ? sources : []
-    }));
-
-  } catch (error) {
-    console.error("Error fetching trends:", error);
+    console.error("YouTube API failed:", error);
     throw error;
   }
 };
@@ -389,6 +466,129 @@ export const generateThumbnailImage = async (description: string): Promise<strin
     return null;
   } catch (error) {
     console.error("Error generating thumbnail:", error);
+    return null;
+  }
+};
+
+export const fetchVideoDetails = async (videoId: string, apiKey: string): Promise<VideoDetails> => {
+  try {
+    const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&id=${videoId}&key=${apiKey}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    
+    if (!res.ok) throw new Error(data.error?.message || "YouTube API Error");
+    if (!data.items || data.items.length === 0) throw new Error("Video not found");
+
+    const item = data.items[0];
+    return {
+      id: item.id,
+      title: item.snippet.title,
+      description: item.snippet.description,
+      tags: item.snippet.tags || [],
+      thumbnailUrl: item.snippet.thumbnails?.maxres?.url || item.snippet.thumbnails?.high?.url || item.snippet.thumbnails?.medium?.url,
+      channelTitle: item.snippet.channelTitle,
+      viewCount: item.statistics.viewCount,
+      likeCount: item.statistics.likeCount,
+      publishedAt: item.snippet.publishedAt
+    };
+  } catch (error) {
+    console.error("Fetch Video Details Error:", error);
+    throw error;
+  }
+};
+
+export const analyzeVideoForOptimization = async (video: VideoDetails): Promise<VideoOptimizationResult> => {
+  const modelId = 'gemini-3-flash-preview';
+  
+  const prompt = `
+    Analyze this YouTube video metadata to improve its performance (CTR and SEO).
+    
+    Current Metadata:
+    Title: "${video.title}"
+    Channel: "${video.channelTitle}"
+    Stats: ${video.viewCount} views, ${video.likeCount} likes.
+    Tags: ${video.tags.join(', ')}
+    Description Snippet: "${video.description.substring(0, 300)}..."
+
+    YOUR TASK:
+    1. Critique: Briefly analyze why this title/metadata might be good or bad.
+    2. Suggest 5 Improved Titles: Focus on high CTR, curiosity, and urgency.
+    3. Suggest an Improved Description: Write the first 3 lines (the hook) and a brief SEO summary.
+    4. Suggest Improved Tags: 10 high-volume, relevant keywords.
+    5. Thumbnail Advice: Describe what a perfect thumbnail for this specific video should look like.
+
+    Return JSON.
+  `;
+
+  const schema: Schema = {
+    type: Type.OBJECT,
+    properties: {
+      critique: { type: Type.STRING },
+      improvedTitles: { type: Type.ARRAY, items: { type: Type.STRING } },
+      improvedDescription: { type: Type.STRING },
+      improvedTags: { type: Type.ARRAY, items: { type: Type.STRING } },
+      thumbnailSuggestions: { type: Type.STRING },
+    },
+    required: ['critique', 'improvedTitles', 'improvedDescription', 'improvedTags', 'thumbnailSuggestions']
+  };
+
+  try {
+    const response = await ai.models.generateContent({
+      model: modelId,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: schema
+      }
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No optimization generated");
+    return JSON.parse(text) as VideoOptimizationResult;
+  } catch (error) {
+    console.error("Optimization Error:", error);
+    throw error;
+  }
+};
+
+export const editThumbnailImage = async (base64Image: string, prompt: string): Promise<string | null> => {
+  const modelId = 'gemini-2.5-flash-image';
+  
+  // Extract base64 data and mime type
+  const matches = base64Image.match(/^data:(.+);base64,(.+)$/);
+  if (!matches) {
+     console.error("Invalid base64 string provided");
+     return null;
+  }
+  const mimeType = matches[1];
+  const data = matches[2];
+
+  try {
+    const response = await ai.models.generateContent({
+      model: modelId,
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType: mimeType,
+              data: data,
+            },
+          },
+          {
+            text: `Edit this YouTube thumbnail image based on these instructions: ${prompt}. Maintain the core subject and composition but apply the requested changes. Make it look like a high-quality YouTube thumbnail.`,
+          },
+        ],
+      },
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error("Thumbnail Edit Error:", error);
     return null;
   }
 };
